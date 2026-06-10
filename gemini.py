@@ -315,15 +315,27 @@ if 'schedule_by_week' in st.session_state:
             t_prev.append(row)
         st.table(pd.DataFrame(t_prev))
 
-    # --- Tab 3: 代、調課作業核心邏輯面板 ---
+# --- Tab 3: 代、調課作業核心邏輯面板 ---
     with tab3:
         st.subheader("🔄 臨時請假代課與跨課調課處理")
         mode = st.radio("選擇作業類型：", ["1. 辦理臨時請假代課", "2. 辦理雙向課堂對調 (情境 B)"])
         st.divider()
 
+        # 初始化成功與下載狀態
+        if "sub_success_msg" not in st.session_state:
+            st.session_state.sub_success_msg = ""
+        if "sub_download_ready" not in st.session_state:
+            st.session_state.sub_download_ready = None
+            
+        if "exc_success_msg" not in st.session_state:
+            st.session_state.exc_success_msg = ""
+        if "exc_download_ready" not in st.session_state:
+            st.session_state.exc_download_ready = None
+
         if mode == "1. 辦理臨時請假代課":
             st.write("👉 **功能說明**：選取請假老師受更動的課堂，指派 B 老師代課。系統會自動扣除原任課老師當週時數、增加代課老師時數，並在主課表畫面上標註 `[代]`。")
             
+            # --- 建立表單區塊 ---
             with st.form("sub_form"):
                 c1, c2, c3 = st.columns(3)
                 with c1:
@@ -334,11 +346,10 @@ if 'schedule_by_week' in st.session_state:
                     sub_class = st.selectbox("發生班級", classes)
                 
                 b_teacher = st.selectbox("指派代課教師 (B老師)：", teachers)
-                submit_sub = st.form_submit_button("🔥 確認執行代課變更並匯出通知單")
+                submit_sub = st.form_submit_button("🔥 確認執行代課變更並生成通知單")
                 
                 if submit_sub:
                     date_str = sub_date.strftime("%Y-%m-%d")
-                    # 搜尋該日期落在第幾週
                     target_w = None
                     for w_idx, w_val in st.session_state.weeks_db.items():
                         if date_str in w_val["date_to_day_num"]:
@@ -352,66 +363,91 @@ if 'schedule_by_week' in st.session_state:
                         d_num = date_details["day_idx"]
                         p_num = int(re.search(r'\d+', sub_period).group())
                         
-                        # 撈取該格子原始課表資訊
                         orig_cell = st.session_state.schedule_by_week[target_w]["class_data"][sub_class].get((d_num, p_num))
                         if not orig_cell or orig_cell["subj"] == "":
                             st.error(f"❌ 錯誤：{date_str} {sub_period} {sub_class} 原本就沒有排課，無法辦理請假代課！")
                         else:
                             orig_subj = orig_cell["subj"]
-                            a_teacher = orig_cell["teacher"] # 原請假老師 (A老師)
+                            a_teacher = orig_cell["teacher"]
                             
-                            # 執行方案二：動態寫回與連動修改
-                            # 1. 修改班級課表資訊
+                            # 執行資料改寫
                             st.session_state.schedule_by_week[target_w]["class_data"][sub_class][(d_num, p_num)] = {
                                 "subj": orig_subj, "teacher": b_teacher, "label": "[代]"
                             }
-                            # 2. 扣除原任課 A 老師當週該堂課的登記 (使時數統計同步扣除)
                             if a_teacher in st.session_state.schedule_by_week[target_w]["teacher_data"]:
                                 st.session_state.schedule_by_week[target_w]["teacher_data"][a_teacher][(d_num, p_num)] = {
                                     "subj": "", "class": "", "label": ""
                                 }
-                            # 3. 增加新代課 B 老師當週該堂課的登記 (使時數統計同步增加)
                             if b_teacher not in st.session_state.schedule_by_week[target_w]["teacher_data"]:
                                 st.session_state.schedule_by_week[target_w]["teacher_data"][b_teacher] = {}
                             st.session_state.schedule_by_week[target_w]["teacher_data"][b_teacher][(d_num, p_num)] = {
                                 "subj": orig_subj, "class": sub_class, "label": "[代]"
                             }
                             
-                            st.success(f"🎉 變更成功！第 {target_w} 週的主課表已動態更新。")
+                            # 將成功訊息與下載檔案寫入臨時 Session 狀態中
+                            st.session_state.sub_success_msg = f"🎉 變更成功！第 {target_w} 週的主課表已動態更新。"
                             
-                            # 套用 Word 樣板匯出
                             if st.session_state.sub_template:
                                 doc = Document(BytesIO(st.session_state.sub_template))
-                                # 在這裡你可以設計樣板專屬標籤做取代
                                 master_replace(doc, "{{DATE}}", date_str)
                                 master_replace(doc, "{{CLASS}}", sub_class)
                                 master_replace(doc, "{{PERIOD}}", sub_period)
                                 master_replace(doc, "{{SUBJECT}}", orig_subj)
                                 master_replace(doc, "{{LEAVE_TEACHER}}", a_teacher)
                                 master_replace(doc, "{{SUB_TEACHER}}", b_teacher)
-                                
                                 buf = BytesIO(); doc.save(buf)
-                                st.download_button("📥 下載代課通知單.docx", buf.getvalue(), f"{date_str.replace('-','')}_{sub_class}_代課單.docx")
+                                
+                                st.session_state.sub_download_ready = {
+                                    "data": buf.getvalue(),
+                                    "filename": f"{date_str.replace('-','')}_{sub_class}_代課單.docx"
+                                }
                             else:
-                                st.warning("💡 提示：主課表已修正。若需要下載通知單，請先在後台資料夾中放置「代課樣板.docx」。")
+                                st.session_state.sub_download_ready = "NOT_FOUND"
+                            st.rerun()
+
+            # ─── 【重要修正】下載與通知元件移到 st.form 外部 ───
+            current_sub_key = f"{sub_date}_{sub_period}_{sub_class}_{b_teacher}"
+            if "last_sub_key" not in st.session_state:
+                st.session_state.last_sub_key = current_sub_key
+
+            # 偵測使用者變更欄位，則自動清空狀態
+            if current_sub_key != st.session_state.last_sub_key:
+                st.session_state.sub_success_msg = ""
+                st.session_state.sub_download_ready = None
+                st.session_state.last_sub_key = current_sub_key
+
+            # 在表單下方安全渲染
+            if st.session_state.sub_success_msg:
+                st.success(st.session_state.sub_success_msg)
+                
+                if st.session_state.sub_download_ready == "NOT_FOUND":
+                    st.warning("💡 提示：主課表已修正。若需要下載通知單，請先在後台資料夾中放置「代課樣板.docx」。")
+                elif st.session_state.sub_download_ready:
+                    st.download_button(
+                        label="📥 點我下載產生的代課通知單.docx", 
+                        data=st.session_state.sub_download_ready["data"], 
+                        file_name=st.session_state.sub_download_ready["filename"],
+                        type="primary"
+                    )
 
         elif mode == "2. 辦理雙向課堂對調 (情境 B)":
-            st.write("👉 **功能說明**：設定兩門課務互相對調。系統會自動把這兩堂課的時間、班級、科目及老師全要素互換，並在主課表畫面上高亮標註 `[調 日期 星期-節次]`。")
+            st.write("👉 **功能說明**：設定兩門課務互相對調。系統會自動把這兩堂課的時間、班級、科目及老師全要素互換，並在主課表畫面上高亮標註 `[調]`。")
             
+            # --- 建立表單區塊 ---
             with st.form("exc_form"):
                 st.markdown("##### 📍 課堂 A (原課務)")
                 xa1, xa2, xa3 = st.columns(3)
                 with xa1: date_a = st.date_input("課堂 A 日期", datetime(2026, 5, 21))
-                with xa2: period_a = st.selectbox("課堂 A 節次", [f"第 {i} 節" for i in range(1, 9)], index=2) # 預設第3節
+                with xa2: period_a = st.selectbox("課堂 A 節次", [f"第 {i} 節" for i in range(1, 9)], index=2)
                 with xa3: class_a = st.selectbox("課堂 A 班級", classes, key="ex_ca")
                 
                 st.markdown("##### 📍 課堂 B (欲對調之新課務)")
                 xb1, xb2, xb3 = st.columns(3)
                 with xb1: date_b = st.date_input("課堂 B 日期", datetime(2026, 5, 22))
-                with xb2: period_b = st.selectbox("課堂 B 節次", [f"第 {i} 節" for i in range(1, 9)], index=4) # 預設第5節
+                with xb2: period_b = st.selectbox("課堂 B 節次", [f"第 {i} 節" for i in range(1, 9)], index=4)
                 with xb3: class_b = st.selectbox("課堂 B 班級", classes, key="ex_cb")
                 
-                submit_exc = st.form_submit_button("🔥 確認執行雙向調課對調並匯出通知單")
+                submit_exc = st.form_submit_button("🔥 確認執行雙向調課對調並生成通知單")
                 
                 if submit_exc:
                     str_a, str_b = date_a.strftime("%Y-%m-%d"), date_b.strftime("%Y-%m-%d")
@@ -428,39 +464,34 @@ if 'schedule_by_week' in st.session_state:
                         p_a = int(re.search(r'\d+', period_a).group())
                         p_b = int(re.search(r'\d+', period_b).group())
                         
-                        # 撈取兩格原始資料
                         cell_a = st.session_state.schedule_by_week[w_a]["class_data"][class_a].get((dt_a["day_idx"], p_a), {"subj":"","teacher":"","label":""}).copy()
                         cell_b = st.session_state.schedule_by_week[w_b]["class_data"][class_b].get((dt_b["day_idx"], p_b), {"subj":"","teacher":"","label":""}).copy()
                         
                         if cell_a["subj"] == "" and cell_b["subj"] == "":
                             st.error("❌ 錯誤：對調的兩堂課皆為空堂，無需調課！")
                         else:
-                            # 產生符合你期望的標籤格式：[調 月/日 星期-節次]
-                            label_for_a = f"[調 {dt_b['short']} {dt_b['day_name']}-{p_b}]"
-                            label_for_b = f"[調 {dt_a['short']} {dt_a['day_name']}-{p_a}]"
+                            label_for_a = "[調]" if cell_b["subj"] else ""
+                            label_for_b = "[調]" if cell_a["subj"] else ""
                             
-                            # 1. 班級課表雙向改寫
                             st.session_state.schedule_by_week[w_a]["class_data"][class_a][(dt_a["day_idx"], p_a)] = {
-                                "subj": cell_b["subj"], "teacher": cell_b["teacher"], "label": label_for_a if cell_b["subj"] else ""
+                                "subj": cell_b["subj"], "teacher": cell_b["teacher"], "label": label_for_a
                             }
                             st.session_state.schedule_by_week[w_b]["class_data"][class_b][(dt_b["day_idx"], p_b)] = {
-                                "subj": cell_a["subj"], "teacher": cell_a["teacher"], "label": label_for_b if cell_a["subj"] else ""
+                                "subj": cell_a["subj"], "teacher": cell_a["teacher"], "label": label_for_b
                             }
                             
-                            # 2. 教師個人課表與時數結構同步雙向對調
                             t_a, t_b = cell_a["teacher"], cell_b["teacher"]
                             if t_a and t_a in st.session_state.schedule_by_week[w_a]["teacher_data"]:
                                 st.session_state.schedule_by_week[w_a]["teacher_data"][t_a][(dt_a["day_idx"], p_a)] = {
-                                    "subj": cell_b["subj"], "class": class_b if cell_b["subj"] else "", "label": label_for_a if cell_b["subj"] else ""
+                                    "subj": cell_b["subj"], "class": class_b if cell_b["subj"] else "", "label": label_for_a
                                 }
                             if t_b and t_b in st.session_state.schedule_by_week[w_b]["teacher_data"]:
                                 st.session_state.schedule_by_week[w_b]["teacher_data"][t_b][(dt_b["day_idx"], p_b)] = {
-                                    "subj": cell_a["subj"], "class": class_a if cell_a["subj"] else "", "label": label_for_b if cell_a["subj"] else ""
+                                    "subj": cell_a["subj"], "class": class_a if cell_a["subj"] else "", "label": label_for_b
                                 }
                                 
-                            st.success(f"🎉 調課對調完成！當週班級課表、教師課表、及兼代課時數已同步即時修正。")
+                            st.session_state.exc_success_msg = f"🎉 調課對調完成！當週班級課表、教師課表、及兼代課時數已同步即時修正。"
                             
-                            # 套用 Word 調課通知單匯出
                             if st.session_state.exc_template:
                                 doc = Document(BytesIO(st.session_state.exc_template))
                                 master_replace(doc, "{{ORG_DATE}}", str_a)
@@ -478,8 +509,36 @@ if 'schedule_by_week' in st.session_state:
                                 master_replace(doc, "{{NEW_SUBJECT}}", cell_b["subj"])
                                 
                                 buf = BytesIO(); doc.save(buf)
-                                st.download_button("📥 下載調課通知單.docx", buf.getvalue(), f"{str_a.replace('-','')}_調課單.docx")
+                                st.session_state.exc_download_ready = {
+                                    "data": buf.getvalue(),
+                                    "filename": f"{str_a.replace('-','')}_調課單.docx"
+                                }
                             else:
-                                st.warning("💡 提示：主課表已修正。若需要下載通知單，請先在後台資料夾中放置「調課樣板.docx」。")
+                                st.session_state.exc_download_ready = "NOT_FOUND"
+                            st.rerun()
+
+            # ─── 【重要修正】下載與通知元件移到 st.form 外部 ───
+            current_exc_key = f"{date_a}_{period_a}_{class_a}_{date_b}_{period_b}_{class_b}"
+            if "last_exc_key" not in st.session_state:
+                st.session_state.last_exc_key = current_exc_key
+
+            # 偵測使用者變更欄位，則自動清空狀態
+            if current_exc_key != st.session_state.last_exc_key:
+                st.session_state.exc_success_msg = ""
+                st.session_state.exc_download_ready = None
+                st.session_state.last_exc_key = current_exc_key
+
+            # 在表單下方安全渲染
+            if st.session_state.exc_success_msg:
+                st.success(st.session_state.exc_success_msg)
+                if st.session_state.exc_download_ready == "NOT_FOUND":
+                    st.warning("💡 提示：主課表已修正。若需要下載通知單，請先在後台資料夾中放置「調課樣板.docx」。")
+                elif st.session_state.exc_download_ready:
+                    st.download_button(
+                        label="📥 點我下載產生的調課通知單.docx", 
+                        data=st.session_state.exc_download_ready["data"], 
+                        file_name=st.session_state.exc_download_ready["filename"],
+                        type="primary"
+                    )
 else:
     st.info("👋 請至側邊欄設定學期第一週日期、上傳三個基礎資料檔，並點擊「🚀 執行整合」以建構多週次動態調度系統。")
